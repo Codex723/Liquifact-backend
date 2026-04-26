@@ -19,6 +19,7 @@ const { createCorsOptions } = require('./config/cors');
 const { correlationIdMiddleware } = require('./middleware/correlationId');
 const { jsonBodyLimit, urlencodedBodyLimit, payloadTooLargeHandler } = require('./middleware/bodySizeLimits');
 const { auditMiddleware } = require('./middleware/audit');
+const { auditLogMiddleware } = require('./middleware/auditLog');
 const { globalLimiter, sensitiveLimiter } = require('./middleware/rateLimit');
 const { authenticateToken } = require('./middleware/auth');
 const smeRouter = require('./routes/sme');
@@ -88,6 +89,7 @@ function createApp(options = {}) {
   app.use(jsonBodyLimit());
   app.use(urlencodedBodyLimit());
   app.use(globalLimiter);
+  app.use(auditLogMiddleware);
   app.use(auditMiddleware);
 
   app.use('/api/sme', smeRouter);

@@ -308,6 +308,48 @@ Unexpected error:
 
 ---
 
+## Security audit log (Issue #116)
+
+The backend now supports a database-backed append-only audit log for:
+
+- admin actions (for example, KYC state transitions or key-rotation operations)
+- webhook dispatch outcomes (success/failure with redacted payload fields)
+
+### Database migrations
+
+Run SQL migrations in order:
+
+- `migrations/202604260001_create_audit_log_events.sql`
+- `migrations/202604260002_enforce_audit_log_append_only.sql`
+
+`audit_log_events` is enforced as append-only at the database layer via triggers that reject `UPDATE` and `DELETE`.
+
+### Runtime behavior
+
+- `src/middleware/auditLog.js` attaches `req.audit` helpers:
+  - `req.audit.logAdminAction(...)`
+  - `req.audit.logWebhookDelivery(...)`
+- successful `POST|PUT|PATCH|DELETE` requests under `/api/admin/*` are auto-logged
+- sensitive fields are redacted before persistence (`password`, `token`, `secret`, `apiKey`, `privateKey`, etc.)
+
+### Example API usage
+
+Admin action example:
+
+```bash
+curl -X POST http://localhost:3001/api/admin/kyc/cus_42/approve \
+  -H "Authorization: Bearer <admin-jwt>" \
+  -H "x-admin-action: kyc.approve" \
+  -H "x-audit-target-type: kyc_profile" \
+  -H "x-audit-target-id: cus_42" \
+  -H "Content-Type: application/json" \
+  -d '{"reason":"manual review","privateKey":"redacted-at-write-time"}'
+```
+
+Webhook delivery logging is typically called internally from delivery workers/routes via `req.audit.logWebhookDelivery(...)`.
+
+---
+
 ## Load baseline suite
 
 The repo includes a focused load baseline suite for representative core endpoint reads:
