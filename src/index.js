@@ -19,6 +19,7 @@ const {
   payloadTooLargeHandler,
 } = require('./middleware/bodySizeLimits');
 const { auditMiddleware } = require('./middleware/audit');
+const { auditLogMiddleware } = require('./middleware/auditLog');
 const { globalLimiter, sensitiveLimiter } = require('./middleware/rateLimit');
 const { authenticateToken } = require('./middleware/auth');
 const { extractTenant } = require('./middleware/tenant');
@@ -413,6 +414,7 @@ function createApp(options = {}) {
 
   // ✅ 7. Rate limit + audit
   app.use(globalLimiter);
+  app.use(auditLogMiddleware);
   app.use(auditMiddleware);
 
   // ───────── ROUTES ─────────
