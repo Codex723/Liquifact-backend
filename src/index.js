@@ -41,7 +41,9 @@ const { createEscrowIndexer } = require('./jobs/escrowIndexer');
  * @param {object} req - Express request.
  * @param {object} res - Express response.
  * @param {function} next - Next middleware.
+ * @returns {void}
  */
+/*
 function adminAuth(req, res, next) {
   if (req.headers['x-api-key']) {
     return apiKeyAuth(req, res, next);
@@ -49,6 +51,7 @@ function adminAuth(req, res, next) {
     return authenticateToken(req, res, next);
   }
 }
+*/
 
 // /**
 //  * Create the Express application instance.
@@ -334,7 +337,7 @@ const {
 const { auditMiddleware } = require('./middleware/audit');
 const { globalLimiter, sensitiveLimiter } = require('./middleware/rateLimit');
 const { authenticateToken } = require('./middleware/auth');
-const { apiKeyAuth } = require('./middleware/apiKey');
+// const { apiKeyAuth } = require('./middleware/apiKey');
 const smeRouter = require('./routes/sme');
 const { problemJsonHandler, notFoundHandler } = require('./middleware/problemJson');
 const { callSorobanContract } = require('./services/soroban');
@@ -342,12 +345,20 @@ const { performHealthChecks } = require('./services/health');
 const { resolveEscrowAddress, validateMappingConfig } = require('./config/escrowMap');
 const AppError = require('./errors/AppError');
 const logger = require('./logger');
-const sentry = require('./observability/sentry');
+// const sentry = require('./observability/sentry');
 const requestId = require('./middleware/requestId');
 const pinoHttp = require('pino-http');
 const investRoutes = require('./routes/invest');
+const v1Router = require('./routes/v1');
 const invoiceFileRouter = require('./routes/invoiceFile');
 const investorRoutes = require('./routes/investor');
+const retentionRoutes = require('./routes/retention');
+const { createRedisEscrowSummaryCache } = require('./cache/redis');
+const { legalHoldGate } = require('./middleware/legalHoldGate');
+const { submitEscrowFunding } = require('./services/escrowSubmit');
+const { fetchLegalHold } = require('./services/escrowRead');
+const { validateQuery, paginationQuerySchema } = require('./schemas/invoice');
+const { computeEscrowDerivedFields } = require('./services/escrowDerived');
 
 const PORT = process.env.PORT || 3001;
 
@@ -356,6 +367,12 @@ const escrowSummaryCache = createRedisEscrowSummaryCache();
 // In-memory storage
 let invoices = [];
 
+/**
+ * Parses a ledger sequence value into a positive integer.
+ *
+ * @param {unknown} value - The value to parse.
+ * @returns {number|null} The parsed sequence or null if invalid.
+ */
 function parseLedgerSequence(value) {
   if (value === undefined || value === null || value === '') {
     return null;
@@ -367,6 +384,13 @@ function parseLedgerSequence(value) {
   return parsed;
 }
 
+/**
+ * Creates the Express application instance.
+ *
+ * @param {object} [options={}] - App options.
+ * @param {boolean} [options.enableTestRoutes] - Whether to enable test routes.
+ * @returns {import('express').Express} The Express application instance.
+ */
 function createApp(options = {}) {
   const { enableTestRoutes = false } = options;
 
@@ -381,8 +405,8 @@ function createApp(options = {}) {
       logger,
       genReqId: (req) => req.id,
       customLogLevel: (req, res, err) => {
-        if (res.statusCode >= 500 || err) return 'error';
-        if (res.statusCode >= 400) return 'warn';
+        if (res.statusCode >= 500 || err) {return 'error';}
+        if (res.statusCode >= 400) {return 'warn';}
         return 'info';
       },
       serializers: {
@@ -418,12 +442,20 @@ function createApp(options = {}) {
   app.use(auditLogMiddleware);
   app.use(auditMiddleware);
 
+  // Deprecation middleware for /api paths
+  app.use('/api', (req, res, next) => {
+    res.set('Deprecation', 'true');
+    res.set('Warning', '299 - "This API version is deprecated. Please use /v1/ endpoints."');
+    next();
+  });
+
   // ───────── ROUTES ─────────
 
   app.use('/api/sme', smeRouter);
   app.use('/api/invest', investRoutes);
   app.use('/api/investor', investorRoutes);
   app.use('/api/invoices', invoiceFileRouter);
+  app.use('/v1', v1Router);
   app.use('/api/retention', retentionRoutes);
 
   app.get('/health', async (req, res) => {
@@ -927,23 +959,23 @@ function createApp(options = {}) {
   });
 
   // V1 API Namespace
-  const v1Router = express.Router();
+  const versionedRouter = express.Router();
 
-  // Escrow read — uses readEscrowState with legal_hold
-  v1Router.get('/escrow/:invoiceId', authenticateToken, async (req, res, next) => {
+  // Escrow routes in V1
+  versionedRouter.get('/escrow/:invoiceId', authenticateToken, async (req, res) => {
     const { invoiceId } = req.params;
+    const currentLedger = parseLedgerSequence(req.headers['x-ledger-sequence']);
     try {
-      // Resolve escrow contract address using the mapping system
       const escrowAddress = resolveEscrowAddress(invoiceId);
-      
+
       if (!escrowAddress) {
-        throw new AppError({
+        return next(new AppError({
           type: 'https://liquifact.com/probs/not-found',
           title: 'Escrow Not Found',
           status: 404,
           detail: `No escrow contract mapping found for invoice ID '${invoiceId}'`,
           instance: req.originalUrl,
-        });
+        }));
       }
 
       if (escrowSummaryCache) {
@@ -951,30 +983,21 @@ function createApp(options = {}) {
         if (cached.hit) {
           res.set('X-Cache', 'HIT');
           res.set('X-Escrow-Address', escrowAddress);
+          const derived = computeEscrowDerivedFields(cached.value);
           return res.json({
-            data: {
-              ...cached.value,
-              escrowAddress,
-            },
+            data: { ...cached.value, escrowAddress, ...derived },
             message: 'Escrow summary served from Redis cache.',
           });
         }
       }
 
-      /**
-       * Soroban operation for escrow lookup using resolved contract address.
-       *
-       * @returns {Promise<object>} Escrow state with contract address.
-       */
-      const operation = async () => {
-        return {
-          invoiceId,
-          escrowAddress,
-          status: 'not_found',
-          fundedAmount: 0,
-          ledgerSequence: currentLedger,
-        };
-      };
+      const operation = async () => ({
+        invoiceId,
+        escrowAddress,
+        status: 'not_found',
+        fundedAmount: 0,
+        ledgerSequence: currentLedger,
+      });
 
       const data = await callSorobanContract(operation);
       if (escrowSummaryCache) {
@@ -982,29 +1005,13 @@ function createApp(options = {}) {
       }
       res.set('X-Cache', 'MISS');
       res.set('X-Escrow-Address', escrowAddress);
-      const operation = async () => ({
-        invoiceId,
-        status: 'not_found',
-        fundedAmount: 0,
-        ledgerSequence: currentLedger,
-      });
-
-      const data = await callSorobanContract(operation);
+      const derived = computeEscrowDerivedFields(data);
       return res.json({
-        data,
-        message: 'Escrow state read from Soroban contract (mocked).',
+        data: { ...data, ...derived },
+        message: 'Escrow state read from Soroban contract.',
       });
     } catch (error) {
-      throw new AppError({
-        type: 'https://liquifact.com/probs/service-unavailable',
-        title: 'Service Unavailable',
-        status: 503,
-        detail: 'Error fetching escrow state',
-        instance: req.originalUrl,
-      });
-    }
-  });
-      return res.status(500).json({ error: error.message || 'Error fetching escrow state' });
+      return next(error);
     }
   });
 
@@ -1046,7 +1053,7 @@ function createApp(options = {}) {
   });
 
   // Versioned routes
-  app.use('/v1', v1Router);
+  app.use('/v1', versionedRouter);
 
 // if (enableTestRoutes) {
 //   app.get('/__test__/explode', () => {
@@ -1062,7 +1069,7 @@ if (enableTestRoutes) {
   app.get('/api/escrow/:invoiceId', (req, res, next) => {
     res.set('Warning', '299 - "This endpoint is deprecated. Use /v1/escrow instead."');
     next();
-  }, v1Router.stack.find(s => s.route && s.route.path === '/escrow/:invoiceId').handle);
+  }, versionedRouter.stack.find(s => s.route && s.route.path === '/escrow/:invoiceId').handle);
 
   app.post('/api/escrow/:invoiceId/fund', (req, res, next) => {
     next();
@@ -1186,8 +1193,11 @@ const appInstance = createApp({
   enableTestRoutes: process.env.NODE_ENV === 'test',
 });
 
-let escrowIndexer = null;
-
+/**
+ * Starts the Express server.
+ *
+ * @returns {import('http').Server} The server instance.
+ */
 function startServer() {
   const server = appInstance.listen(PORT, () => {
     logger.warn(`API running at http://localhost:${PORT}`);
@@ -1203,6 +1213,11 @@ function startServer() {
   return server;
 }
 
+/**
+ * Resets the in-memory invoice store.
+ *
+ * @returns {void}
+ */
 function resetStore() {
   invoices.length = 0;
 }
