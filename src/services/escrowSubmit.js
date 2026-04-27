@@ -454,6 +454,10 @@ function resolveSigningConfig(requestedMode, env = process.env) {
 /**
  * Builds the Soroban fund operation intent represented by this stub.
  *
+ * Correlation Strategy:
+ * - For Soroban: invoiceId is passed as a contract argument (contract-local).
+ * - For Stellar Classic: memo is used for ledger-wide correlation (mapping in escrow_operations).
+ *
  * @param {Object} request - Normalized funding request.
  * @param {Object} config - Redacted signing configuration.
  * @param {Object} options - Request context.
