@@ -4,7 +4,10 @@ const globals = require('globals');
 
 module.exports = [
   {
-    files: ['src/**/*.js'],
+    ignores: ['coverage/**'],
+  },
+  {
+    files: ['src/**/*.js', 'migrator-config.js', 'scripts/**/*.js'],
     plugins: { security, jsdoc },
     languageOptions: {
       ecmaVersion: 2022,
@@ -19,13 +22,13 @@ module.exports = [
       'jsdoc/require-description': 'error',
       'jsdoc/require-returns': 'error',
       'jsdoc/require-param': 'error',
-      'no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
+      'no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrorsIgnorePattern: '^_' }],
       'no-undef': 'error',
       'curly': 'error',
     },
   },
   {
-    files: ['src/**/*.test.js', 'src/**/__tests__/**/*.js', 'src/__tests__/**/*.js'],
+    files: ['src/**/*.test.js', 'src/**/__tests__/**/*.js', 'src/__tests__/**/*.js', 'tests/**/*.js'],
     languageOptions: {
       globals: {
         ...globals.node,

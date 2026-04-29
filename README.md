@@ -10,6 +10,7 @@ Part of the LiquiFact stack: frontend (Next.js) | backend (this repo) | contract
 
 - Node.js 20+ (LTS recommended)
 - npm 9+
+- Docker & Docker Compose (for local PostgreSQL)
 
 ---
 
@@ -28,11 +29,82 @@ Part of the LiquiFact stack: frontend (Next.js) | backend (this repo) | contract
    npm install
    ```
 
-3. Configure environment if needed
+3. Configure environment
 
    ```bash
    cp .env.example .env
+   # Edit .env with your database configuration
    ```
+
+4. Start database services
+
+   ```bash
+   docker-compose -f docker-compose.dev.yml up -d
+   ```
+
+5. Run database migrations
+
+   ```bash
+   npm run db:migrate
+   ```
+
+---
+
+## Observability
+
+Optional Sentry error tracking is supported through the `SENTRY_DSN` environment variable. When enabled, the server scrubs sensitive values before sending events, including:
+
+- Invoice payload bodies and invoice-related fields
+- Authorization headers and bearer tokens
+- API keys and secret values
+- Stellar XDR / Stellar-specific payloads
+
+Environment variables:
+
+- `SENTRY_DSN` — Optional Sentry DSN. Example: `https://<PUBLIC_KEY>@o<ORG_ID>.ingest.sentry.io/<PROJECT_ID>`
+- `SENTRY_RELEASE` — Optional release tag. Defaults to package version when available.
+- `SENTRY_ENVIRONMENT` — Optional environment tag. Defaults to `NODE_ENV`.
+
+Do not store secrets in source control. Use `.env` locally and deployment secrets in production.
+
+---
+
+## Stellar Network Configuration
+
+The API enforces a strict matching between `STELLAR_NETWORK` and `SOROBAN_RPC_URL` at boot time. This prevents misconfiguration where a passphrase (network identity) is paired with an incompatible RPC endpoint, which would cause on-chain validation failures.
+
+### Supported networks
+
+| Network | Passphrase | RPC URL |
+| --- | --- | --- |
+| TESTNET | `Test SDF Network ; September 2015` | `https://soroban-testnet.stellar.org` |
+| MAINNET | `Public Global Stellar Network ; September 2014` | `https://soroban.stellar.org` |
+| FUTURENET | `Test SDF Future Network ; October 2022` | `https://rpc-futurenet.stellar.org` |
+
+### Configuration
+
+Set both variables in your `.env`:
+
+```bash
+STELLAR_NETWORK=TESTNET
+SOROBAN_RPC_URL=https://soroban-testnet.stellar.org
+```
+
+Do NOT use custom RPC URLs. The validation will reject any deviation from the expected RPC for the selected network.
+
+### Boot-time validation
+
+On startup, `src/index.js` calls `validateStellarConfig()` from `src/config/stellar.js`. If the network/RPC combination is invalid, the server fails to start with a clear error message:
+
+```
+Error: Mismatch: STELLAR_NETWORK=TESTNET requires SOROBAN_RPC_URL="https://soroban-testnet.stellar.org", but got "https://custom-rpc.example.com". This combination would cause on-chain validation failures.
+```
+
+### Security notes
+
+- The validation is a hard fail - no partial or degraded operation is permitted.
+- This ensures the backend never signs transactions with a mismatched network, which could result in fund loss.
+- The passphrase is derived from the network constant and is not user-configurable.
 
 ---
 
@@ -41,19 +113,89 @@ Part of the LiquiFact stack: frontend (Next.js) | backend (this repo) | contract
 | Command | Description |
 | --- | --- |
 | `npm run dev` | Start API with watch mode |
+| `npm run dev:ts` | Start API with TS runtime (optional) |
 | `npm run start` | Start API |
+| `npm run typecheck` | Run TypeScript type checking (no emit) |
+| `npm run build` | Compile `src/` to `dist/` |
+| `npm run start:dist` | Start compiled output from `dist/` |
 | `npm run lint` | Run ESLint on `src/` |
 | `npm test` | Run load helper tests and structured error tests |
+| `npm run db:migrate` | Run database migrations |
+| `npm run db:rollback` | Rollback last migration |
+| `npm run db:seed` | Run database seeds |
+| `npm run db:migrate:down` | Rollback last migration |
+| `npm run db:migrate:create <name>` | Create new migration file |
+| `npm run db:migrate:reset` | Reset database (drop & re-run) |
 | `npm run test:coverage` | Run helper/API tests with coverage |
 | `npm run load:baseline` | Run the core endpoint load baseline suite |
 
 Default port: `3001`.
+Escrow Redis cache is optional and disabled by default; set `REDIS_ESCROW_CACHE_ENABLED=true` with `REDIS_URL` to enable it.
+`REDIS_ESCROW_CACHE_TTL_SECONDS` is strictly clamped to `5..300`, and `REDIS_ESCROW_LEDGER_GAP_THRESHOLD` controls ledger-gap invalidation.
+
+Incremental TypeScript setup and migration guidance lives in `docs/typescript-plan.md`.
+
+---
+
+## Database Migrations
+
+This project uses **node-pg-migrate** for database schema management with PostgreSQL. The migration system provides:
+
+- SQL-first migration control with rollback support
+- Multi-tenant architecture with Row Level Security (RLS)
+- Production-safe transaction handling
+- Comprehensive audit logging
+
+### Quick Database Setup
+
+```bash
+# Start PostgreSQL and Redis
+docker-compose -f docker-compose.dev.yml up -d
+
+# Run migrations
+npm run db:migrate
+```
+
+### Key Features
+
+- **Multi-tenant isolation** with tenant-scoped data
+- **Soft deletes** for data recovery
+- **Audit trail** for compliance
+- **UUID primary keys** for distributed systems
+- **JSONB metadata** for schema flexibility
+
+📖 **Full documentation**: See [`DB_MIGRATIONS.md`](./DB_MIGRATIONS.md) for comprehensive migration guide, troubleshooting, and deployment procedures.
+
+---
+
+## API Documentation
+
+The API is documented using OpenAPI 3.0 specification.
+
+- **OpenAPI JSON**: `GET /openapi.json` - Machine-readable API specification
+- **Interactive Docs**: `GET /docs` - Swagger UI for exploring and testing the API
+- **Correlation Strategy**: See [`docs/invoice-correlation.md`](./docs/invoice-correlation.md) for details on how `invoiceId` correlates with on-chain Stellar and Soroban data.
+
+The documentation covers all public endpoints including health checks, invoice management, escrow operations, and investment opportunities.
+
+- **Marketplace**: `GET /api/marketplace` - Search and sort invoices by yield, maturity, and funded ratio. Supports advanced filtering (`yieldBpsMin`, `maturityDateTo`, `fundedRatioMin`, etc.) and pagination.
+
+**Example:**
+```bash
+curl -H "Authorization: Bearer <token>" \
+     "http://localhost:3001/api/marketplace?yieldBpsMin=500&sortBy=yield_bps&order=desc"
+```
+
+---
 
 Core routes currently covered:
 
 - Health: `GET /health`
-- Invoices: `GET /api/invoices`
-- Escrow: `GET /api/escrow/:invoiceId`
+- API Info: `GET /api`
+- Invoices: `GET /api/invoices` (with optional status filter), `GET /api/invoices/:id`, `POST /api/invoices`
+- Escrow: `GET /api/escrow/:invoiceId`, `POST /api/escrow`
+- Investment: `GET /api/invest/opportunities`
+- SME Metrics: `GET /api/sme/metrics`
 
 ---
 
@@ -72,6 +214,65 @@ liquifact-backend/
 ├── .env.example
 ├── eslint.config.js
 └── package.json
+```
+
+---
+
+## Escrow Address Mapping
+
+The API supports invoice-to-escrow contract address resolution using environment-based configuration for early phases. This allows mapping invoice IDs to their corresponding Stellar escrow contract addresses without requiring on-chain registry lookups.
+
+### Configuration
+
+Configure escrow mappings using the `ESCROW_ADDR_BY_INVOICE` environment variable:
+
+```bash
+ESCROW_ADDR_BY_INVOICE='{"mappings":[{"invoiceId":"inv_demo_001","escrowAddress":"GABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890ABCDEFGHIJKLM","environment":"development","isActive":true}],"defaultEnvironment":"development","allowlistEnabled":true,"cacheEnabled":true,"cacheTtlSeconds":300}'
+```
+
+### Security Features
+
+- **Allowlist Validation**: Only mapped invoices can be resolved
+- **Environment Separation**: Different mappings for development, staging, production
+- **Address Validation**: Ensures Stellar addresses are properly formatted
+- **Caching**: In-memory caching with configurable TTL
+- **Input Validation**: Strict validation of invoice IDs and addresses
+
+### Usage Examples
+
+The mapping system is automatically used by escrow endpoints. When resolving `/api/escrow/:invoiceId`, the system:
+
+1. Validates the invoice ID format
+2. Checks if the invoice is in the allowlist for the current environment
+3. Returns the corresponding Stellar escrow contract address
+4. Caches the result for subsequent requests
+
+### Rotation and Multi-Environment Support
+
+For production deployments:
+
+1. **Environment Separation**: Use different mappings per environment
+2. **Key Rotation**: Update mappings by modifying the environment variable
+3. **Monitoring**: Use health checks to validate mapping configuration
+4. **Security**: Only map invoices you own or have explicit permission to map
+
+### Configuration Schema
+
+```json
+{
+  "mappings": [
+    {
+      "invoiceId": "inv_123",
+      "escrowAddress": "GABC...123",
+      "environment": "development",
+      "isActive": true
+    }
+  ],
+  "defaultEnvironment": "development",
+  "allowlistEnabled": true,
+  "cacheEnabled": true,
+  "cacheTtlSeconds": 300
+}
 ```
 
 ---
@@ -143,6 +344,37 @@ Do not run the suite against production without explicit approval.
    ```bash
    LOAD_DURATION_SECONDS=20 LOAD_CONNECTIONS=25 LOAD_ESCROW_INVOICE_ID=invoice-123 npm run load:baseline
    ```
+
+---
+
+## E2E Testing (API)
+
+The repository includes a reproducible one-command E2E smoke test script that uses Docker Compose to spin up a fully isolated environment including the API, a test Postgres database, and a mocked Soroban RPC server.
+
+### What is tested
+- Service health: `/health` (verifies API, DB reachability, and Soroban mock integration).
+- Versioned API: `GET /v1/escrow/:invoiceId` (verifies token authentication and Soroban mock state).
+- Backward compatibility: `GET /api/escrow/:invoiceId` (verifies deprecation warning headers).
+
+### How to run
+Ensure you have Docker and Docker Compose installed.
+
+```bash
+npm run e2e:api
+```
+
+The script will:
+1. Build and start the `api`, `db`, and `mock-soroban` services.
+2. Wait for the API to report a healthy status.
+3. Run the Jest smoke test suite against the live containers.
+4. Clean up (shutdown and remove) the containers and volumes.
+
+### Security and Reliability
+- **Isolated Environment**: Uses a dedicated `docker-compose.e2e.yml` and a private network.
+- **Mocked Dependencies**: Points `SOROBAN_RPC_URL` to a local mock server to ensure tests are fast, deterministic, and don't require external network access.
+- **Fail-Fast Healthchecks**: The API and DB services use Docker healthchecks to ensure dependent services only start when their dependencies are ready.
+
+---
 
 ### Reports
 
@@ -303,6 +535,48 @@ Unexpected error:
   }
 }
 ```
+
+---
+
+## Security audit log (Issue #116)
+
+The backend now supports a database-backed append-only audit log for:
+
+- admin actions (for example, KYC state transitions or key-rotation operations)
+- webhook dispatch outcomes (success/failure with redacted payload fields)
+
+### Database migrations
+
+Run SQL migrations in order:
+
+- `migrations/202604260001_create_audit_log_events.sql`
+- `migrations/202604260002_enforce_audit_log_append_only.sql`
+
+`audit_log_events` is enforced as append-only at the database layer via triggers that reject `UPDATE` and `DELETE`.
+
+### Runtime behavior
+
+- `src/middleware/auditLog.js` attaches `req.audit` helpers:
+  - `req.audit.logAdminAction(...)`
+  - `req.audit.logWebhookDelivery(...)`
+- successful `POST|PUT|PATCH|DELETE` requests under `/api/admin/*` are auto-logged
+- sensitive fields are redacted before persistence (`password`, `token`, `secret`, `apiKey`, `privateKey`, etc.)
+
+### Example API usage
+
+Admin action example:
+
+```bash
+curl -X POST http://localhost:3001/api/admin/kyc/cus_42/approve \
+  -H "Authorization: Bearer <admin-jwt>" \
+  -H "x-admin-action: kyc.approve" \
+  -H "x-audit-target-type: kyc_profile" \
+  -H "x-audit-target-id: cus_42" \
+  -H "Content-Type: application/json" \
+  -d '{"reason":"manual review","privateKey":"redacted-at-write-time"}'
+```
+
+Webhook delivery logging is typically called internally from delivery workers/routes via `req.audit.logWebhookDelivery(...)`.
 
 ---
 
